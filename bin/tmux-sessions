@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# tmux-sessions — fzf-based tmux session manager
+#
+# Outside tmux: pick a session to attach, or type a new name to create one.
+# Inside tmux:  switches sessions via switch-client (no nesting).
+#               The current session is excluded from the list.
+#
+# Keys:
+#   Enter  — attach selected session / create session with typed name
+#   Ctrl-N — force-create a session with the typed name
+#   Ctrl-R — rename selected session
+#   Ctrl-X — kill selected session (with confirmation)
+#   Esc    — quit
+set -euo pipefail
+
+# ── i18n ────────────────────────────────────────────────────
+TSK_CONFIG="$HOME/.config/tmux-session-kit/config"
+TSK_LANG="en"
+# shellcheck source=/dev/null
+[[ -f "$TSK_CONFIG" ]] && source "$TSK_CONFIG"
+
+if [[ "$TSK_LANG" == "ko" ]]; then
+  MSG_HEADER=$'단축키:\n  Enter : 접속 (없는 이름이면 새로 생성)\n  C-n   : 새 세션 강제 생성\n  C-r   : 이름 변경\n  C-x   : 삭제'
+  MSG_CURRENT_SESSION="현재 세션"
+  MSG_NEW_SESSION_PREVIEW="(새 세션으로 생성됩니다)"
+  MSG_RENAME_FMT="'%s' 의 새 이름 (빈 입력 = 취소): "
+  MSG_DELETE_FMT="세션 '%s' 삭제?  (1) 예 / (2) 아니오: "
+else
+  MSG_HEADER=$'Keys:\n  Enter : attach (creates it if the name is new)\n  C-n   : force-create new session\n  C-r   : rename session\n  C-x   : kill session'
+  MSG_CURRENT_SESSION="Current session"
+  MSG_NEW_SESSION_PREVIEW="(will be created as a new session)"
+  MSG_RENAME_FMT="New name for '%s' (empty = cancel): "
+  MSG_DELETE_FMT="Kill session '%s'?  (1) yes / (2) no: "
+fi
+
+# ── tmux context ────────────────────────────────────────────
+inside_tmux=false
+current_session=""
+if [[ -n "${TMUX:-}" ]]; then
+  inside_tmux=true
+  current_session=$(tmux display-message -p '#{session_name}')
+fi
+
+# Go to a session: switch-client inside tmux (avoids nesting), attach outside.
+goto_session() {
+  local name="$1"
+  if $inside_tmux; then
+    tmux switch-client -t "=$name"
+  else
+    exec tmux attach-session -t "=$name"
+  fi
+  exit 0
+}
+
+create_session() {
+  local name="$1"
+  if $inside_tmux; then
+    tmux new-session -d -s "$name"
+    tmux switch-client -t "=$name"
+  else
+    exec tmux new-session -s "$name"
+  fi
+  exit 0
+}
+
+# ── main loop ───────────────────────────────────────────────
+while true; do
+  mapfile -t all_sessions < <(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
+
+  # Exclude the current session from the pick list (shown in the header instead)
+  sessions=()
+  for s in "${all_sessions[@]}"; do
+    [[ -n "$s" && "$s" != "$current_session" ]] && sessions+=("$s")
+  done
+
+  header="$MSG_HEADER"
+  if $inside_tmux; then
+    header="${MSG_CURRENT_SESSION}: ${current_session}"$'\n\n'"$header"
+  fi
+
+  set +e
+  result=$(
+    { ((${#sessions[@]})) && printf '%s\n' "${sessions[@]}"; } |
+      fzf \
+        --height=100% \
+        --layout=reverse \
+        --border=rounded \
+        --prompt="tmux session > " \
+        --header="$header" \
+        --pointer="▶" \
+        --info=inline \
+        --preview "tmux capture-pane -ep -t {} 2>/dev/null || echo \"$MSG_NEW_SESSION_PREVIEW\"" \
+        --preview-window=right:55% \
+        --print-query \
+        --expect=ctrl-n,ctrl-r,ctrl-x
+  )
+  fzf_status=$?
+  set -e
+
+  # Esc / Ctrl-C
+  [[ $fzf_status -eq 130 ]] && exit 0
+
+  query=$(sed -n '1p' <<<"$result")
+  key=$(sed -n '2p' <<<"$result")
+  selection=$(sed -n '3p' <<<"$result")
+
+  case "$key" in
+    ctrl-n)
+      # Ignore the list selection; force-create with the typed name
+      [[ -z "$query" ]] && continue
+      create_session "$query"
+      ;;
+    ctrl-r)
+      [[ -z "$selection" ]] && continue
+      printf '\n'
+      read -r -p "$(printf "$MSG_RENAME_FMT" "$selection")" new_name || true
+      if [[ -n "${new_name:-}" ]]; then
+        tmux rename-session -t "=$selection" "$new_name"
+      fi
+      ;;
+    ctrl-x)
+      [[ -z "$selection" ]] && continue
+      printf '\n'
+      read -r -p "$(printf "$MSG_DELETE_FMT" "$selection")" confirm || true
+      if [[ "${confirm:-}" == "1" ]]; then
+        tmux kill-session -t "=$selection"
+      fi
+      ;;
+    *)
+      # Enter
+      if [[ -n "$selection" ]]; then
+        goto_session "$selection"
+      elif [[ -n "$query" ]]; then
+        # No matching session for the typed name — create it
+        create_session "$query"
+      else
+        exit 0
+      fi
+      ;;
+  esac
+done

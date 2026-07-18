@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# dev-launcher — dev tool launcher for a tmux popup (bound to M-q in tmux.conf)
+set -uo pipefail
+
+# tmux popups may not inherit the login shell PATH; supplement it explicitly
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/go/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+# ── i18n ────────────────────────────────────────────────────
+TSK_CONFIG="$HOME/.config/tmux-session-kit/config"
+TSK_LANG="en"
+# shellcheck source=/dev/null
+[[ -f "$TSK_CONFIG" ]] && source "$TSK_CONFIG"
+
+if [[ "$TSK_LANG" == "ko" ]]; then
+  MSG_ERROR_PREFIX="오류"
+  MSG_NOT_FOUND_FMT="'%s' 프로그램이 설치되어 있지 않거나 PATH에서 찾을 수 없습니다."
+  MSG_PRESS_ENTER="Enter를 누르면 메뉴로 돌아갑니다..."
+else
+  MSG_ERROR_PREFIX="Error"
+  MSG_NOT_FOUND_FMT="'%s' is not installed or not found in PATH."
+  MSG_PRESS_ENTER="Press Enter to return to the menu..."
+fi
+
+pause_with_error() {
+  printf '\n%s: %s\n\n' "$MSG_ERROR_PREFIX" "$1"
+  read -r -p "$MSG_PRESS_ENTER"
+}
+
+run_command() {
+  local command_name="$1"
+  shift
+  if command -v "$command_name" >/dev/null 2>&1; then
+    "$command_name" "$@"
+  else
+    pause_with_error "$(printf "$MSG_NOT_FOUND_FMT" "$command_name")"
+  fi
+}
+
+while true; do
+  choice=$(
+    printf '%s\n' \
+      "󰆍  Sessions" \
+      "󰕰  Tree" \
+      "󰊢  Git" \
+      "󰡨  Docker" \
+      "󰉋  Files" \
+      "󰚩  Claude" \
+      "󰩈  Exit" |
+      fzf \
+        --height=100% \
+        --layout=reverse \
+        --border=rounded \
+        --prompt="Open > " \
+        --pointer="▶" \
+        --marker="✓" \
+        --info=inline \
+        --no-scrollbar
+  )
+
+  case "$choice" in
+    *"Sessions")
+      # tmux-sessions uses switch-client inside tmux, so it is safe
+      # to run it directly inside this popup (no nesting issues).
+      "$HOME/.local/bin/tmux-sessions"
+      exit 0
+      ;;
+    *"Tree")
+      # Full session > window > pane tree. +/- to expand/collapse, Enter to jump.
+      tmux choose-tree -Z
+      exit 0
+      ;;
+    *"Git")
+      run_command lazygit
+      ;;
+    *"Docker")
+      run_command lazydocker
+      ;;
+    *"Files")
+      # Running yazi directly inside a popup can kill the tmux server due to a
+      # known terminal-query bug (yazi#2308), so open it in a new window instead.
+      # The popup starts in pane_current_path, so $PWD is the current pane's path.
+      if command -v yazi >/dev/null 2>&1; then
+        tmux new-window -c "$PWD" -n yazi "yazi"
+        exit 0
+      else
+        pause_with_error "$(printf "$MSG_NOT_FOUND_FMT" "yazi")"
+      fi
+      ;;
+    *"Claude")
+      run_command claude
+      ;;
+    *"Exit"|"")
+      exit 0
+      ;;
+  esac
+done
