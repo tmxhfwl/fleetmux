@@ -219,7 +219,11 @@ preview_session() {
   tmux list-windows -t "=$name" \
     -F '#{window_index}:#{window_name}#{?window_active,*,}' 2>/dev/null | paste -sd' ' -
   printf '%s%s%s\n' "$C_DIM" "────────────────────────────────────────" "$C_RESET"
-  tmux capture-pane -ep -t "=$name" 2>/dev/null || true
+  # capture-pane cannot resolve a bare "=session" target — resolve the active
+  # pane id first ("=session:" form: exact match + session qualifier)
+  local pane
+  pane=$(tmux display-message -p -t "=$name:" '#{pane_id}' 2>/dev/null || true)
+  [[ -n "$pane" ]] && tmux capture-pane -ep -t "$pane" 2>/dev/null || true
 }
 
 # ── subcommands: --kill / --rename (run inside fzf execute) ─
